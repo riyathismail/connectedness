@@ -1,0 +1,79 @@
+data=PriceData
+View(data)
+date=data$Date
+df=data[,-1]
+View(df)
+library(zoo)
+zoodata=zoo(df,order.by = date)
+View(zoodata)
+library(ConnectednessApproach)
+dyc=ConnectednessApproach(zoodata, nlag = 1, nfore = 10, window.size = 200, model = "TVP-VAR", connectedness = "Time")
+dyc$TABLE
+View(dyc$TABLE)
+ConnectednessApproach::PlotNetwork(dyc)
+
+##The total connectedness index (TCI) illustrates the average impact a shock in one series has on all others.
+PlotTCI(dyc, ylim=c(0,100))
+
+## On the one side, the total directional connectedness TO others, TOi, represents the impact series i has on all other series
+PlotTO(dyc, ylim=c(0,130))
+
+##while the total directional connectedness FROM, FROMi, others demonstrates the impact all series have on series i.
+PlotFROM(dyc, ylim=c(0,100))
+
+## Interestingly, the average of all TO or all FROM values is equal to the TCI.
+## The difference between the total directional connectedness TO and FROM others results in the net total directional connectedness, NETi, which illustrates the net influence on the predefined network. 
+## If NETi>0(NETi<0), we know that the impact series i has on all others is larger (smaller) than the impact all others have on series i. 
+## Thus, series i is considered as a net transmitter (receiver) of shocks and hence driving (driven by) the network.
+
+PlotNET(dyc, ylim=c(-50,50))
+
+## On the bilateral level, the net pairwise directional connectedness measure, NPSOij, is of major interest. 
+## If NPSOij>0 (NPSOij<0) it means that series i has a larger (smaller) impact on series j than series j has on series i.
+PlotNPDC(dyc, ylim=c(-10,10))
+
+## Another interesting plot is the net pairwise transmission plot which illustrates how many series series i dominates. 
+## If the network consists of k series, one series can at maximum dominate k−1 series. This plot summarizes the net transmission mechanism of each series.
+PlotNPT(dyc)
+
+PlotNetwork(dyc, method="NPDC")
+PlotNetwork(dyc, method="PCI")
+
+
+
+library(tidyr)
+library(dplyr)
+
+# Extract TCI TO, FROM and NET data 
+dyc$TABLE
+DYTable_data <- dyc$TABLE
+
+dyc$TCI
+TCI_data <- dyc$TCI
+
+dyc$TO
+to_data <- dyc$TO
+
+dyc$FROM
+From_data <- dyc$FROM
+
+dyc$NET
+NET_data <- dyc$NET
+
+
+
+# View table
+View(dyc$TABLE)
+View(dyc$TCI)
+View(dyc$TO)
+View(dyc$FROM)
+View(dyc$NET)
+
+
+# Write to csv
+write.csv(dyc$TABLE, "DYTable_table.csv")
+write.csv(dyc$TCI, "TCI_table.csv")
+write.csv(dyc$TO, "to_table.csv")
+write.csv(dyc$FROM, "FROM_table.csv")
+write.csv(dyc$NET, "NET_table.csv")
+
