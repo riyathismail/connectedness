@@ -180,6 +180,8 @@ title(main = "Network Plot - Symmetric Shocks")
 write.csv(dyc_positive$TO, "TO_positive_table.csv")
 write.csv(dyc_positive$FROM, "FROM_positive_table.csv")
 write.csv(dyc_positive$NET, "NET_positive_table.csv")
+write.csv(dyc_positive$TABLE, "Table_positive.csv")
+write.csv(dyc_positive$TCI, "TCI_positive.csv")
 
 # Save results for negative components
 write.csv(dyc_negative$TABLE, "TABLE_negative_table.csv")
@@ -194,6 +196,7 @@ write.csv(dyc_symmetric$TCI, "TCI_symmetric_table.csv")
 write.csv(dyc_symmetric$TO, "TO_symmetric_table.csv")
 write.csv(dyc_symmetric$FROM, "FROM_symmetric_table.csv")
 write.csv(dyc_symmetric$NET, "NET_symmetric_table.csv")
+
 
 # View the tables
 View(dyc_positive$TABLE)
@@ -216,4 +219,40 @@ View(dyc_positive$NET)
 View(dyc_negative$NET)
 View(dyc_symmetric$NET)
 
-          
+
+#Combined TCI Plot
+# Load necessary libraries
+library(ggplot2)
+library(reshape2)
+library(zoo)
+
+# Extract the correct dates from your original data
+correct_dates <- as.Date(ReturnData$Date[-1])  # Align with the zoo object, remove first date due to differencing
+
+# Ensure the TCI zoo objects align with correct dates
+tci_positive <- zoo(dyc_positive$TCI, order.by = correct_dates)
+tci_negative <- zoo(dyc_negative$TCI, order.by = correct_dates)
+tci_symmetric <- zoo(dyc_symmetric$TCI, order.by = correct_dates)
+
+# Combine the TCI data into a single data frame for plotting
+combined_tci <- data.frame(
+  Date = correct_dates,  # Use the correctly aligned dates
+  Positive = as.numeric(tci_positive),
+  Negative = as.numeric(tci_negative),
+  Symmetric = as.numeric(tci_symmetric)
+)
+
+# Melt the data for ggplot2
+melted_tci <- melt(combined_tci, id.vars = "Date", variable.name = "Shock", value.name = "TCI")
+
+# Create the plot using ggplot2
+ggplot(melted_tci, aes(x = Date, y = TCI, color = Shock)) +
+  geom_line(size = 1) +
+  scale_color_manual(values = c("Positive" = "blue", "Negative" = "red", "Symmetric" = "green")) +
+  labs(title = "Total Connectedness Index for Different Shocks",
+       x = "Date",
+       y = "TCI",
+       color = "Shock Type") +
+  theme_minimal() +
+  theme(legend.position = "top") +
+  scale_x_date(date_breaks = "1 year", date_labels = "%Y")  # Adjust date formatting
