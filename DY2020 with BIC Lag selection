@@ -1,0 +1,97 @@
+# Load required libraries
+library(vars)
+library(zoo)
+library(ConnectednessApproach)
+library(tidyr)
+library(dplyr)
+
+# Load data (assuming it's already in your workspace as 'PriceData')
+data = PriceData
+
+# Create a sequence of dates
+data$OriginalDate <- data$Date  # Keep the original dates for reference
+data$Date <- seq(as.Date("2001-01-01"), by="month", length.out=nrow(data))
+
+# Remove rows with NA in any column
+data <- na.omit(data)
+
+# Prepare data
+date <- data$Date
+df <- data[, !(names(data) %in% c("Date", "OriginalDate"))]
+
+# Create zoo object with proper dates
+zoodata <- zoo(df, order.by = date)
+
+# Check if there are any duplicate dates
+if(any(duplicated(index(zoodata)))) {
+  zoodata <- aggregate(zoodata, by=index(zoodata), FUN=mean)
+}
+
+# Function to calculate BIC for a given lag
+calculate_bic = function(data, lag) {
+  var_model = VAR(data, p = lag, type = "const")
+  return(BIC(var_model))
+}
+
+# Find optimal lag based on BIC
+max_lag = 10  # You can adjust this value
+bic_values = sapply(1:max_lag, function(lag) calculate_bic(df, lag))
+optimal_lag = which.min(bic_values)
+
+print(paste("Optimal lag based on BIC:", optimal_lag))
+
+# Perform Diebold-Yilmaz connectedness analysis with optimal lag
+dyc = ConnectednessApproach(zoodata, 
+                            nlag = optimal_lag, 
+                            nfore = 10, 
+                            window.size = 200, 
+                            model = "TVP-VAR", 
+                            connectedness = "Time")
+
+# View and plot results
+dyc$TABLE
+View(dyc$TABLE)
+ConnectednessApproach::PlotNetwork(dyc)
+
+# Plot Total Connectedness Index (TCI)
+PlotTCI(dyc, ylim=c(0,100))
+
+# Plot Total Directional Connectedness TO others
+PlotTO(dyc, ylim=c(0,130))
+
+# Plot Total Directional Connectedness FROM others
+PlotFROM(dyc, ylim=c(0,100))
+
+# Plot Net Total Directional Connectedness
+PlotNET(dyc, ylim=c(-50,50))
+
+# Plot Net Pairwise Directional Connectedness
+PlotNPDC(dyc, ylim=c(-10,10))
+
+# Plot Net Pairwise Transmission
+PlotNPT(dyc)
+
+# Plot Network using different methods
+PlotNetwork(dyc, method="NPDC")
+PlotNetwork(dyc, method="PCI")
+
+# Extract data from dyc object
+DYTable_data <- dyc$TABLE
+TCI_data <- dyc$TCI
+to_data <- dyc$TO
+From_data <- dyc$FROM
+NET_data <- dyc$NET
+
+# View extracted data
+View(dyc$TABLE)
+View(dyc$TCI)
+View(dyc$TO)
+View(dyc$FROM)
+View(dyc$NET)
+
+# Write data to CSV files
+write.csv(dyc$TABLE, "DYTable_table.csv")
+write.csv(dyc$TCI, "TCI_table.csv")
+write.csv(dyc$TO, "to_table.csv")
+write.csv(dyc$FROM, "FROM_table.csv")
+write.csv(dyc$NET, "NET_table.csv")
