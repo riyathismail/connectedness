@@ -1,0 +1,227 @@
+# Load necessary libraries
+library(readxl)
+library(ConnectednessApproach)
+library(zoo)
+library(dplyr)
+library(vars)
+
+# Load the Excel file
+ReturnData <- read_excel("ReturnData.xlsx")
+
+# Convert the Date column to Date class
+ReturnData$Date <- as.Date(ReturnData$Date)
+
+# Remove duplicate dates if any
+if(any(duplicated(ReturnData$Date))) {
+  ReturnData <- ReturnData[!duplicated(ReturnData$Date), ]
+}
+
+# Remove rows with NA values in the return data
+return_data <- dplyr::select(ReturnData, -Date) %>% na.omit()
+
+# Revised transform_hatemi_j function
+transform_hatemi_j <- function(x) {
+  # Estimate drift and deterministic trend
+  t <- seq_along(x)
+  model <- lm(x ~ t)
+  c <- coef(model)[1]  # Intercept (drift)
+  d <- coef(model)[2]  # Slope (deterministic trend)
+  
+  # Calculate v_t (residuals)
+  v_t <- residuals(model)
+  
+  # Initial value
+  G_0 <- x[1]
+  
+  # Calculate positive and negative components
+  v_plus <- pmax(v_t, 0)
+  v_minus <- pmin(v_t, 0)
+  
+  # Cumulative sums including initial value and deterministic trend
+  G_plus <- c * t + (d * t * (t + 1) / 2) + G_0 / 2 + cumsum(v_plus)
+  G_minus <- c * t + (d * t * (t + 1) / 2) + G_0 / 2 + cumsum(v_minus)
+  
+  return(list(G_plus = G_plus, G_minus = G_minus))
+}
+
+# Apply the transformation to the return data
+transformed_data <- lapply(return_data, transform_hatemi_j)
+
+# Separate datasets for positive and negative components
+positive_returns <- do.call(cbind, lapply(transformed_data, `[[`, "G_plus"))
+negative_returns <- do.call(cbind, lapply(transformed_data, `[[`, "G_minus"))
+
+# For symmetric model, use the original returns
+symmetric_returns <- return_data
+
+# Convert to zoo objects
+date <- ReturnData$Date
+positive_zoodata <- zoo(positive_returns, order.by = date)
+negative_zoodata <- zoo(negative_returns, order.by = date)
+symmetric_zoodata <- zoo(symmetric_returns, order.by = date)
+
+# Function to calculate BIC
+calculate_bic <- function(data, lag) {
+  var_model <- VAR(data, p = lag, type = "const")
+  return(BIC(var_model))
+}
+
+# Set the maximum lag for BIC calculation
+max_lag <- 10
+
+# Calculate BIC for positive, negative, and symmetric returns
+bic_values_positive <- sapply(1:max_lag, function(lag) calculate_bic(positive_returns, lag))
+bic_values_negative <- sapply(1:max_lag, function(lag) calculate_bic(negative_returns, lag))
+bic_values_symmetric <- sapply(1:max_lag, function(lag) calculate_bic(symmetric_returns, lag))
+
+# Find the optimal lag based on the minimum BIC
+optimal_lag_positive <- which.min(bic_values_positive)
+optimal_lag_negative <- which.min(bic_values_negative)
+optimal_lag_symmetric <- which.min(bic_values_symmetric)
+
+print(paste("Optimal lag for positive returns based on BIC:", optimal_lag_positive))
+print(paste("Optimal lag for negative returns based on BIC:", optimal_lag_negative))
+print(paste("Optimal lag for symmetric returns based on BIC:", optimal_lag_symmetric))
+
+# Perform connectedness analysis
+dyc_positive <- ConnectednessApproach(positive_zoodata, nlag = optimal_lag_positive, nfore = 10, window.size = 200, model = "TVP-VAR", connectedness = "Time")
+dyc_negative <- ConnectednessApproach(negative_zoodata, nlag = optimal_lag_negative, nfore = 10, window.size = 200, model = "TVP-VAR", connectedness = "Time")
+dyc_symmetric <- ConnectednessApproach(symmetric_zoodata, nlag = optimal_lag_symmetric, nfore = 10, window.size = 200, model = "TVP-VAR", connectedness = "Time")
+
+# View the results
+View(dyc_positive$TABLE)
+View(dyc_negative$TABLE)
+View(dyc_symmetric$TABLE)
+
+# Combined TCI Plot
+library(ggplot2)
+library(reshape2)
+
+# Extract the correct dates from your original data
+correct_dates <- ReturnData$Date
+
+# Ensure the TCI zoo objects align with correct dates
+tci_positive <- zoo(dyc_positive$TCI, order.by = correct_dates)
+tci_negative <- zoo(dyc_negative$TCI, order.by = correct_dates)
+tci_symmetric <- zoo(dyc_symmetric$TCI, order.by = correct_dates)
+
+# Combine the TCI data into a single data frame for plotting
+combined_tci <- data.frame(
+  Date = correct_dates,
+  Positive = as.numeric(tci_positive),
+  Negative = as.numeric(tci_negative),
+  Symmetric = as.numeric(tci_symmetric)
+)
+
+# Melt the data for ggplot2
+melted_tci <- melt(combined_tci, id.vars = "Date", variable.name = "Shock", value.name = "TCI")
+
+# Create the plot using ggplot2
+ggplot(melted_tci, aes(x = Date, y = TCI, color = Shock)) +
+  geom_line(size = 1) +
+  scale_color_manual(values = c("Positive" = "blue", "Negative" = "red", "Symmetric" = "green")) +
+  labs(title = "Total Connectedness Index for Different Shocks",
+       x = "Date",
+       y = "TCI",
+       color = "Shock Type") +
+  theme_minimal() +
+  theme(legend.position = "top") +
+  scale_x_date(date_breaks = "1 year", date_labels = "%Y")
+
+
+# Plot the results (you can keep your existing plotting code here)
+
+# Adjust margins and label settings
+par(mar = c(5, 5, 4, 2), las = 1)  # Larger margins and horizontal y-labels
+
+# Plot Total Connectedness Index (TCI)
+PlotTCI(dyc_positive, ylim = c(0, 100))
+#title(main = "Total Connectedness Index - Positive Shocks", xlab = "Date", ylab = "TCI")
+
+PlotTCI(dyc_negative, ylim = c(0, 100))
+#title(main = "Total Connectedness Index - Negative Shocks", xlab = "Date", ylab = "TCI")
+
+PlotTCI(dyc_symmetric, ylim = c(0, 100))
+#title(main = "Total Connectedness Index - Symmetric Shocks", xlab = "Date", ylab = "TCI")
+
+# Plot Total Directional Connectedness TO
+PlotTO(dyc_positive, ylim = c(0, 130))
+#title(main = "Directional Connectedness TO - Positive Shocks", xlab = "Date", ylab = "TO")
+
+PlotTO(dyc_negative, ylim = c(0, 130))
+#title(main = "Directional Connectedness TO - Negative Shocks", xlab = "Date", ylab = "TO")
+
+PlotTO(dyc_symmetric, ylim = c(0, 130))
+#title(main = "Directional Connectedness TO - Symmetric Shocks", xlab = "Date", ylab = "TO")
+
+# Plot Total Directional Connectedness FROM
+PlotFROM(dyc_positive, ylim = c(0, 100))
+#title(main = "Directional Connectedness FROM - Positive Shocks", xlab = "Date", ylab = "FROM")
+
+PlotFROM(dyc_negative, ylim = c(0, 100))
+#title(main = "Directional Connectedness FROM - Negative Shocks", xlab = "Date", ylab = "FROM")
+
+PlotFROM(dyc_symmetric, ylim = c(0, 100))
+#title(main = "Directional Connectedness FROM - Symmetric Shocks", xlab = "Date", ylab = "FROM")
+
+# Plot Net Total Directional Connectedness
+PlotNET(dyc_positive, ylim = c(-80, 80))
+#title(main = "Net Directional Connectedness - Positive Shocks", xlab = "Date", ylab = "NET")
+
+PlotNET(dyc_negative, ylim = c(-80, 80))
+#title(main = "Net Directional Connectedness - Negative Shocks", xlab = "Date", ylab = "NET")
+
+PlotNET(dyc_symmetric, ylim = c(-80, 80))
+#title(main = "Net Directional Connectedness - Symmetric Shocks", xlab = "Date", ylab = "NET")
+
+# Plot Net Pairwise Directional Connectedness
+PlotNPDC(dyc_positive, ylim = c(-20, 20))
+#title(main = "Net Pairwise Directional Connectedness - Positive Shocks", xlab = "Date", ylab = "NPDC")
+
+PlotNPDC(dyc_negative, ylim = c(-20, 20))
+#title(main = "Net Pairwise Directional Connectedness - Negative Shocks", xlab = "Date", ylab = "NPDC")
+
+PlotNPDC(dyc_symmetric, ylim = c(-20, 20))
+#title(main = "Net Pairwise Directional Connectedness - Symmetric Shocks", xlab = "Date", ylab = "NPDC")
+
+# Plot Net Pairwise Transmission
+PlotNPT(dyc_positive)
+#title(main = "Net Pairwise Transmission - Positive Shocks", xlab = "Date", ylab = "NPT")
+
+PlotNPT(dyc_negative)
+#title(main = "Net Pairwise Transmission - Negative Shocks", xlab = "Date", ylab = "NPT")
+
+PlotNPT(dyc_symmetric)
+#title(main = "Net Pairwise Transmission - Symmetric Shocks", xlab = "Date", ylab = "NPT")
+
+# Plot Network using different methods
+PlotNetwork(dyc_positive, method = "NPDC")
+title(main = "Network Plot - Positive Shocks")
+
+PlotNetwork(dyc_negative, method = "NPDC")
+title(main = "Network Plot - Negative Shocks")
+
+PlotNetwork(dyc_symmetric, method = "NPDC")
+title(main = "Network Plot - Symmetric Shocks")
+
+# Save the results
+write.csv(dyc_positive$TABLE, "TABLE_positive_table.csv")
+write.csv(dyc_negative$TABLE, "TABLE_negative_table.csv")
+write.csv(dyc_symmetric$TABLE, "TABLE_symmetric_table.csv")
+
+write.csv(dyc_positive$TCI, "TCI_positive_table.csv")
+write.csv(dyc_negative$TCI, "TCI_negative_table.csv")
+write.csv(dyc_symmetric$TCI, "TCI_symmetric_table.csv")
+
+write.csv(dyc_positive$TO, "TO_positive_table.csv")
+write.csv(dyc_negative$TO, "TO_negative_table.csv")
+write.csv(dyc_symmetric$TO, "TO_symmetric_table.csv")
+
+write.csv(dyc_positive$FROM, "FROM_positive_table.csv")
+write.csv(dyc_negative$FROM, "FROM_negative_table.csv")
+write.csv(dyc_symmetric$FROM, "FROM_symmetric_table.csv")
+
+write.csv(dyc_positive$NET, "NET_positive_table.csv")
+write.csv(dyc_negative$NET, "NET_negative_table.csv")
+write.csv(dyc_symmetric$NET, "NET_symmetric_table.csv")
+
