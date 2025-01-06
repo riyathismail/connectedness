@@ -1,0 +1,127 @@
+Sub ExtractDataWithDynamicFields()
+    Dim wsSource As Worksheet
+    Dim wsTarget As Workbook
+    Dim rngStatementData As Range
+    Dim colStart As Integer
+    Dim colEnd As Integer
+    Dim rowStart As Integer
+    Dim lastRow As Integer
+    Dim targetRow As Integer
+    Dim targetCol As Integer
+    Dim companyName As String
+    Dim yearValue As String
+    Dim cellValue As Variant
+    Dim row As Integer
+    Dim col As Integer
+    Dim fieldName As String
+    Dim industryGroup As String
+    Dim auditorName As String
+    Dim auditorOpinion As String
+    
+    ' Create a new workbook to store the extracted data
+    Set wsTarget = Workbooks.Add
+    wsTarget.Sheets(1).Range("A1").Value = "Year" ' Add Year column
+    wsTarget.Sheets(1).Range("B1").Value = "Company Name" ' Add Company Name column
+    wsTarget.Sheets(1).Range("C1").Value = "TRBC Industry Group" ' Add TRBC Industry Group column
+    wsTarget.Sheets(1).Range("D1").Value = "Auditor Name" ' Add Auditor Name column
+    wsTarget.Sheets(1).Range("E1").Value = "Auditor Opinion" ' Add Auditor Opinion column
+    targetRow = 2 ' Start writing data from row 2
+    targetCol = 6 ' Start writing data from Column F (after the new columns)
+    
+    ' Loop through all sheets in the source workbook
+    For Each wsSource In ThisWorkbook.Sheets
+        ' Get the company name from cell C2
+        companyName = wsSource.Range("C2").Value
+        
+        ' Check if the company name is empty or invalid
+        If Trim(companyName) = "" Then
+            MsgBox "Company name is missing in sheet '" & wsSource.Name & "' (cell C2).", vbExclamation, "Error"
+            Exit Sub
+        End If
+        
+        ' Search for TRBC Industry Group, Auditor Name, and Auditor Opinion in Column B
+        On Error Resume Next
+        industryGroup = wsSource.Columns("B:B").Find(What:="TRBC Industry Group", LookIn:=xlValues, LookAt:=xlWhole).Offset(0, 1).Value
+        auditorName = wsSource.Columns("B:B").Find(What:="Auditor Name", LookIn:=xlValues, LookAt:=xlWhole).Offset(0, 1).Value
+        auditorOpinion = wsSource.Columns("B:B").Find(What:="Auditor Opinion", LookIn:=xlValues, LookAt:=xlWhole).Offset(0, 1).Value
+        On Error GoTo 0
+        
+        ' Handle missing fields
+        If industryGroup = "" Then industryGroup = "Not Available"
+        If auditorName = "" Then auditorName = "Not Available"
+        If auditorOpinion = "" Then auditorOpinion = "Not Available"
+        
+        ' Find the "Statement Data" header in row 11
+        Set rngStatementData = wsSource.Rows(11).Find(What:="Statement Data", LookIn:=xlValues, LookAt:=xlWhole, MatchCase:=False)
+        If rngStatementData Is Nothing Then
+            MsgBox "'Statement Data' not found in sheet '" & wsSource.Name & "' (row 11)."
+            Exit Sub
+        End If
+        
+        ' Define the range of columns and rows to process
+        colStart = rngStatementData.Column + 1 ' Start from the next column
+        colEnd = wsSource.Cells(rngStatementData.row, wsSource.Columns.Count).End(xlToLeft).Column ' Last filled column
+        rowStart = rngStatementData.row + 1 ' Start from the row below "Statement Data"
+        lastRow = wsSource.Cells(wsSource.Rows.Count, "A").End(xlUp).row ' Last filled row in Column A
+        
+        ' Add headers for non-empty items in Column A in their original order
+        For row = rowStart To lastRow
+            If Trim(wsSource.Cells(row, 1).Value) <> "" Then
+                fieldName = Trim(wsSource.Cells(row, 1).Value)
+                
+                ' Check if the column header already exists
+                Dim existingHeader As Range
+                Set existingHeader = wsTarget.Sheets(1).Rows(1).Find(What:=fieldName, LookIn:=xlValues, LookAt:=xlWhole, MatchCase:=False)
+                
+                If existingHeader Is Nothing Then
+                    ' Add the item name as a new header
+                    wsTarget.Sheets(1).Cells(1, targetCol).Value = fieldName
+                    targetCol = targetCol + 1
+                End If
+            End If
+        Next row
+        
+        ' Loop through the years and extract data for non-empty items
+        For col = colStart To colEnd
+            yearValue = wsSource.Cells(11, col).Value ' Header (year)
+            If IsNumeric(yearValue) Then
+                ' Check if year already exists in the target workbook
+                Dim existingYear As Range
+                Set existingYear = wsTarget.Sheets(1).Columns(1).Find(What:=yearValue, LookIn:=xlValues, LookAt:=xlWhole)
+                
+                If existingYear Is Nothing Then
+                    ' If year doesn't exist, add it and additional columns
+                    wsTarget.Sheets(1).Cells(targetRow, 1).Value = yearValue ' Year
+                    wsTarget.Sheets(1).Cells(targetRow, 2).Value = companyName ' Company Name
+                    wsTarget.Sheets(1).Cells(targetRow, 3).Value = industryGroup ' TRBC Industry Group
+                    wsTarget.Sheets(1).Cells(targetRow, 4).Value = auditorName ' Auditor Name
+                    wsTarget.Sheets(1).Cells(targetRow, 5).Value = auditorOpinion ' Auditor Opinion
+                    targetRow = targetRow + 1
+                End If
+                
+                ' Write values for non-empty items
+                For row = rowStart To lastRow
+                    If Trim(wsSource.Cells(row, 1).Value) <> "" Then
+                        fieldName = Trim(wsSource.Cells(row, 1).Value)
+                        
+                        ' Find the correct column for the field
+                        Dim headerCol As Range
+                        Set headerCol = wsTarget.Sheets(1).Rows(1).Find(What:=fieldName, LookIn:=xlValues, LookAt:=xlWhole)
+                        
+                        If Not headerCol Is Nothing Then
+                            cellValue = wsSource.Cells(row, col).Value ' Value for the item
+                            If existingYear Is Nothing Then
+                                wsTarget.Sheets(1).Cells(targetRow - 1, headerCol.Column).Value = cellValue
+                            Else
+                                wsTarget.Sheets(1).Cells(existingYear.row, headerCol.Column).Value = cellValue
+                            End If
+                        End If
+                    End If
+                Next row
+            End If
+        Next col
+    Next wsSource
+    
+    MsgBox "Data from all sheets has been successfully extracted with additional fields."
+End Sub
+
