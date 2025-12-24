@@ -1,0 +1,744 @@
+# app.R - Diebold-Yilmaz TVP-VAR Connectedness Analysis
+# 
+# Author: Dr. M.I.M. Riyath
+# Department of Accountancy and Finance
+# Faculty of Management and Commerce
+# South Eastern University of Sri Lanka, Sri Lanka
+# Email: riyath@seu.ac.lk
+#
+# Version: 2.0
+# Last Updated: December 2025
+
+library(shiny)
+library(shinythemes)
+library(vars)
+library(zoo)
+library(ConnectednessApproach)
+library(tidyr)
+library(dplyr)
+library(readxl)
+library(DT)
+library(ggplot2)
+library(lubridate)
+
+# ---------- HELPER FUNCTIONS ------------------------------------------------
+
+# Function to detect date frequency automatically
+detect_date_frequency <- function(dates) {
+  if(length(dates) < 2) return("unknown")
+  
+  # Calculate differences between consecutive dates
+  date_diffs <- as.numeric(diff(sort(dates)))
+  median_diff <- median(date_diffs, na.rm = TRUE)
+  
+  # Determine frequency based on median difference
+  if(median_diff <= 1.5) {
+    return("daily")
+  } else if(median_diff >= 2 && median_diff <= 10) {
+    return("weekly")
+  } else if(median_diff >= 28 && median_diff <= 31) {
+    return("monthly")
+  } else if(median_diff >= 89 && median_diff <= 92) {
+    return("quarterly")
+  } else if(median_diff >= 365 && median_diff <= 366) {
+    return("yearly")
+  } else {
+    return("irregular")
+  }
+}
+
+# Function to parse dates from various formats
+parse_dates <- function(date_vector) {
+  # Try multiple date formats
+  parsed <- tryCatch({
+    as.Date(date_vector)
+  }, error = function(e) {
+    tryCatch({
+      as.Date(as.numeric(date_vector), origin = "1899-12-30")  # Excel dates
+    }, error = function(e2) {
+      tryCatch({
+        parse_date_time(date_vector, orders = c("ymd", "dmy", "mdy", "ymd HMS", "dmy HMS", "mdy HMS"))
+      }, error = function(e3) {
+        NULL
+      })
+    })
+  })
+  
+  return(as.Date(parsed))
+}
+
+# ---------- UI --------------------------------------------------------------
+
+ui <- fluidPage(
+  theme = shinytheme("flatly"),
+  
+  # Custom CSS
+  tags$head(
+    tags$style(HTML("
+      .app-footer {
+        position: fixed;
+        bottom: 0;
+        width: 100%;
+        background-color: #2c3e50;
+        color: white;
+        text-align: center;
+        padding: 10px 0;
+        font-size: 12px;
+        z-index: 1000;
+        box-shadow: 0 -2px 5px rgba(0,0,0,0.1);
+      }
+      .app-footer a {
+        color: #3498db;
+        text-decoration: none;
+      }
+      .app-footer a:hover {
+        color: #5dade2;
+        text-decoration: underline;
+      }
+      .main-content {
+        padding-bottom: 60px;
+      }
+      .info-box {
+        background-color: #f8f9fa;
+        border-left: 4px solid #3498db;
+        padding: 15px;
+        margin-bottom: 20px;
+      }
+      .success-box {
+        background-color: #d4edda;
+        border-left: 4px solid #28a745;
+        padding: 10px;
+        margin-bottom: 15px;
+        border-radius: 4px;
+      }
+      .warning-box {
+        background-color: #fff3cd;
+        border-left: 4px solid #ffc107;
+        padding: 10px;
+        margin-bottom: 15px;
+        border-radius: 4px;
+      }
+    "))
+  ),
+  
+  div(class = "main-content",
+      titlePanel("Diebold-Yilmaz TVP-VAR Connectedness Analysis"),
+      
+      sidebarLayout(
+        sidebarPanel(
+          width = 3,
+          
+          div(class = "info-box",
+              h5(icon("info-circle"), " Upload Data"),
+              p("Upload an Excel file with date column and price/return series.")
+          ),
+          
+          fileInput("file", "Upload Excel File (.xlsx/.xls)", 
+                    accept = c(".xlsx", ".xls")),
+          
+          hr(),
+          
+          h5(icon("calendar"), " Date Settings"),
+          selectInput("dateCol", "Select Date Column:", choices = NULL),
+          
+          uiOutput("dateFreqInfo"),
+          
+          hr(),
+          
+          h5(icon("cut"), " Sample Period (Optional)"),
+          checkboxInput("useSampleSplit", "Split Sample Period", value = FALSE),
+          
+          conditionalPanel(
+            condition = "input.useSampleSplit == true",
+            div(class = "warning-box",
+                p(icon("exclamation-triangle"), " Splitting the sample will use only the selected date range.")
+            ),
+            uiOutput("dateRangeUI")
+          ),
+          
+          hr(),
+          
+          h5(icon("sliders"), " Model Parameters"),
+          numericInput("maxLag", "Maximum Lag for BIC:", value = 10, min = 1, max = 20),
+          numericInput("nfore", "Forecast Horizon:", value = 10, min = 1, max = 50),
+          numericInput("windowSize", "Rolling Window Size:", value = 200, min = 50, max = 500),
+          selectInput("model", "Model Type:", 
+                      choices = c("TVP-VAR", "VAR"),
+                      selected = "TVP-VAR"),
+          
+          hr(),
+          
+          actionButton("runAnalysis", "Run Analysis", 
+                       class = "btn-primary btn-block", 
+                       icon = icon("play")),
+          
+          hr(),
+          
+          downloadButton("downloadReport", "Download All Results", 
+                         class = "btn-success btn-block")
+        ),
+        
+        mainPanel(
+          width = 9,
+          
+          tabsetPanel(
+            id = "mainTabs",
+            
+            tabPanel("Data Preview",
+                     h4(icon("table"), " Raw Data"),
+                     DTOutput("rawData"),
+                     hr(),
+                     h4(icon("chart-bar"), " Summary Statistics"),
+                     verbatimTextOutput("dataSummary"),
+                     hr(),
+                     uiOutput("sampleInfo")
+            ),
+            
+            tabPanel("Optimal Lag",
+                     h4(icon("chart-line"), " BIC Values for Different Lags"),
+                     plotOutput("bicPlot", height = "400px"),
+                     hr(),
+                     verbatimTextOutput("optimalLagText"),
+                     hr(),
+                     DTOutput("bicTable")
+            ),
+            
+            tabPanel("Connectedness Table",
+                     h4(icon("table"), " Static Connectedness Table"),
+                     DTOutput("dyTable")
+            ),
+            
+            tabPanel("Total Connectedness",
+                     h4(icon("chart-area"), " Total Connectedness Index (TCI)"),
+                     plotOutput("tciPlot", height = "500px"),
+                     hr(),
+                     DTOutput("tciTable")
+            ),
+            
+            tabPanel("TO Connectedness",
+                     h4(icon("arrow-right"), " Directional Connectedness TO Others"),
+                     plotOutput("toPlot", height = "500px"),
+                     hr(),
+                     DTOutput("toTable")
+            ),
+            
+            tabPanel("FROM Connectedness",
+                     h4(icon("arrow-left"), " Directional Connectedness FROM Others"),
+                     plotOutput("fromPlot", height = "500px"),
+                     hr(),
+                     DTOutput("fromTable")
+            ),
+            
+            tabPanel("NET Connectedness",
+                     h4(icon("arrows-alt-h"), " Net Directional Connectedness"),
+                     plotOutput("netPlot", height = "500px"),
+                     hr(),
+                     DTOutput("netTable")
+            ),
+            
+            tabPanel("Network Plots",
+                     h4(icon("project-diagram"), " Network Visualization"),
+                     fluidRow(
+                       column(6,
+                              h5("Default Network"),
+                              plotOutput("networkDefault", height = "400px")
+                       ),
+                       column(6,
+                              h5("NPDC Network"),
+                              plotOutput("networkNPDC", height = "400px")
+                       )
+                     ),
+                     hr(),
+                     fluidRow(
+                       column(6,
+                              h5("PCI Network"),
+                              plotOutput("networkPCI", height = "400px")
+                       ),
+                       column(6,
+                              h5("NPDC Over Time"),
+                              plotOutput("npdcPlot", height = "400px")
+                       )
+                     )
+            )
+          )
+        )
+      )
+  ),
+  
+  # Footer
+  div(class = "app-footer",
+      HTML("Developed by <strong>Dr. M.I.M. Riyath</strong> | 
+         Department of Accountancy and Finance, Faculty of Management and Commerce, 
+         South Eastern University of Sri Lanka | 
+         <a href='mailto:riyath@seu.ac.lk'>riyath@seu.ac.lk</a>")
+  )
+)
+
+# ---------- SERVER ----------------------------------------------------------
+
+server <- function(input, output, session) {
+  
+  # Reactive values
+  rv <- reactiveValues(
+    raw_data = NULL,
+    processed_data = NULL,
+    zoo_data = NULL,
+    optimal_lag = NULL,
+    bic_values = NULL,
+    dyc_results = NULL,
+    date_frequency = NULL,
+    min_date = NULL,
+    max_date = NULL,
+    sample_start = NULL,
+    sample_end = NULL
+  )
+  
+  # Load data
+  observeEvent(input$file, {
+    req(input$file)
+    
+    tryCatch({
+      rv$raw_data <- read_excel(input$file$datapath)
+      
+      # Update date column selector
+      updateSelectInput(session, "dateCol", 
+                        choices = names(rv$raw_data),
+                        selected = names(rv$raw_data)[1])
+      
+      showNotification("Data loaded successfully!", type = "message")
+      
+    }, error = function(e) {
+      showNotification(paste("Error loading file:", e$message), type = "error")
+    })
+  })
+  
+  # Detect date frequency when date column is selected
+  observeEvent(input$dateCol, {
+    req(rv$raw_data, input$dateCol)
+    
+    tryCatch({
+      # Parse dates
+      dates <- parse_dates(rv$raw_data[[input$dateCol]])
+      
+      if(all(is.na(dates))) {
+        showNotification("Could not parse dates. Please check your date column format.", 
+                         type = "warning")
+        return()
+      }
+      
+      # Remove NA dates
+      dates <- dates[!is.na(dates)]
+      
+      # Detect frequency
+      freq <- detect_date_frequency(dates)
+      rv$date_frequency <- freq
+      
+      # Store min and max dates
+      rv$min_date <- min(dates, na.rm = TRUE)
+      rv$max_date <- max(dates, na.rm = TRUE)
+      
+      # Set default sample range to full sample
+      rv$sample_start <- rv$min_date
+      rv$sample_end <- rv$max_date
+      
+    }, error = function(e) {
+      showNotification(paste("Error processing dates:", e$message), type = "error")
+    })
+  })
+  
+  # Display date frequency info
+  output$dateFreqInfo <- renderUI({
+    req(rv$date_frequency)
+    
+    freq_label <- switch(rv$date_frequency,
+                         "daily" = "Daily",
+                         "weekly" = "Weekly", 
+                         "monthly" = "Monthly",
+                         "quarterly" = "Quarterly",
+                         "yearly" = "Yearly",
+                         "irregular" = "Irregular",
+                         "Unknown")
+    
+    div(class = "success-box",
+        p(icon("check-circle"), 
+          strong(" Detected Frequency: "), freq_label,
+          br(),
+          strong("Date Range: "), 
+          format(rv$min_date, "%Y-%m-%d"), " to ", 
+          format(rv$max_date, "%Y-%m-%d"))
+    )
+  })
+  
+  # Date range UI
+  output$dateRangeUI <- renderUI({
+    req(rv$min_date, rv$max_date)
+    
+    tagList(
+      dateInput("sampleStart", 
+                "Start Date:", 
+                value = rv$min_date,
+                min = rv$min_date,
+                max = rv$max_date),
+      dateInput("sampleEnd", 
+                "End Date:", 
+                value = rv$max_date,
+                min = rv$min_date,
+                max = rv$max_date),
+      actionButton("resetDates", "Reset to Full Sample", 
+                   class = "btn-sm btn-warning btn-block")
+    )
+  })
+  
+  # Reset dates to full sample
+  observeEvent(input$resetDates, {
+    updateDateInput(session, "sampleStart", value = rv$min_date)
+    updateDateInput(session, "sampleEnd", value = rv$max_date)
+  })
+  
+  # Display raw data
+  output$rawData <- renderDT({
+    req(rv$raw_data)
+    datatable(rv$raw_data, 
+              options = list(scrollX = TRUE, pageLength = 10))
+  })
+  
+  # Display summary
+  output$dataSummary <- renderPrint({
+    req(rv$raw_data)
+    summary(rv$raw_data)
+  })
+  
+  # Sample info
+  output$sampleInfo <- renderUI({
+    req(rv$raw_data, input$dateCol)
+    
+    dates <- parse_dates(rv$raw_data[[input$dateCol]])
+    dates <- dates[!is.na(dates)]
+    
+    div(class = "info-box",
+        h5(icon("info-circle"), " Sample Information"),
+        p(strong("Total Observations: "), length(dates)),
+        p(strong("Date Column: "), input$dateCol),
+        p(strong("First Date: "), format(min(dates), "%Y-%m-%d")),
+        p(strong("Last Date: "), format(max(dates), "%Y-%m-%d"))
+    )
+  })
+  
+  # Run analysis
+  observeEvent(input$runAnalysis, {
+    req(rv$raw_data, input$dateCol)
+    
+    withProgress(message = 'Running Analysis...', value = 0, {
+      
+      tryCatch({
+        
+        # Step 1: Prepare data
+        incProgress(0.1, detail = "Preparing data...")
+        
+        PriceData <- rv$raw_data
+        
+        # Parse dates
+        PriceData$Date <- parse_dates(PriceData[[input$dateCol]])
+        
+        # Remove rows with NA dates
+        PriceData <- PriceData[!is.na(PriceData$Date), ]
+        
+        # Sort by date
+        PriceData <- PriceData[order(PriceData$Date), ]
+        
+        # Apply sample split if requested
+        if(input$useSampleSplit && !is.null(input$sampleStart) && !is.null(input$sampleEnd)) {
+          PriceData <- PriceData[PriceData$Date >= input$sampleStart & 
+                                   PriceData$Date <= input$sampleEnd, ]
+          rv$sample_start <- input$sampleStart
+          rv$sample_end <- input$sampleEnd
+          
+          showNotification(
+            paste("Using sample period:", 
+                  format(input$sampleStart, "%Y-%m-%d"), "to", 
+                  format(input$sampleEnd, "%Y-%m-%d")),
+            type = "message",
+            duration = 5
+          )
+        } else {
+          rv$sample_start <- min(PriceData$Date)
+          rv$sample_end <- max(PriceData$Date)
+        }
+        
+        # Check if we have enough data
+        if(nrow(PriceData) < input$windowSize) {
+          showNotification(
+            paste("Error: Sample size (", nrow(PriceData), 
+                  ") is smaller than window size (", input$windowSize, ")"),
+            type = "error",
+            duration = 10
+          )
+          return()
+        }
+        
+        # Remove NA rows
+        PriceData <- na.omit(PriceData)
+        
+        # Extract dates and data
+        date <- PriceData$Date
+        df <- PriceData[, !(names(PriceData) %in% c("Date", input$dateCol))]
+        
+        # Create zoo object
+        zoo_data <- zoo(df, order.by = date)
+        
+        # Handle duplicate dates
+        if(any(duplicated(index(zoo_data)))) {
+          zoo_data <- aggregate(zoo_data, by = index(zoo_data), FUN = mean)
+          showNotification("Duplicate dates found and averaged.", 
+                           type = "warning", duration = 5)
+        }
+        
+        rv$zoo_data <- zoo_data
+        rv$processed_data <- PriceData
+        
+        # Step 2: Find optimal lag
+        incProgress(0.3, detail = "Calculating optimal lag...")
+        
+        calculate_bic <- function(data, lag) {
+          var_model <- vars::VAR(data, p = lag, type = "const")
+          return(BIC(var_model))
+        }
+        
+        bic_values <- sapply(1:input$maxLag, function(lag) {
+          calculate_bic(zoo_data, lag)
+        })
+        
+        optimal_lag <- which.min(bic_values)
+        
+        rv$bic_values <- data.frame(
+          Lag = 1:input$maxLag,
+          BIC = bic_values
+        )
+        rv$optimal_lag <- optimal_lag
+        
+        # Step 3: Run connectedness analysis
+        incProgress(0.5, detail = "Running connectedness analysis...")
+        
+        dyc <- ConnectednessApproach(zoo_data, 
+                                     nlag = optimal_lag, 
+                                     nfore = input$nfore, 
+                                     window.size = input$windowSize, 
+                                     model = input$model, 
+                                     connectedness = "Time")
+        
+        rv$dyc_results <- dyc
+        
+        incProgress(1.0, detail = "Complete!")
+        
+        showNotification("Analysis completed successfully!", type = "message")
+        updateTabsetPanel(session, "mainTabs", selected = "Optimal Lag")
+        
+      }, error = function(e) {
+        showNotification(paste("Error in analysis:", e$message), type = "error")
+      })
+    })
+  })
+  
+  # BIC Plot
+  output$bicPlot <- renderPlot({
+    req(rv$bic_values, rv$optimal_lag)
+    
+    ggplot(rv$bic_values, aes(x = Lag, y = BIC)) +
+      geom_line(color = "#3498db", size = 1) +
+      geom_point(color = "#2c3e50", size = 3) +
+      geom_point(data = rv$bic_values[rv$optimal_lag, ], 
+                 aes(x = Lag, y = BIC), 
+                 color = "#e74c3c", size = 5) +
+      geom_vline(xintercept = rv$optimal_lag, 
+                 linetype = "dashed", color = "#e74c3c") +
+      annotate("text", x = rv$optimal_lag, y = max(rv$bic_values$BIC), 
+               label = paste("Optimal Lag =", rv$optimal_lag), 
+               hjust = -0.1, color = "#e74c3c", fontface = "bold") +
+      labs(title = "BIC Values Across Different Lags",
+           subtitle = paste("Optimal Lag:", rv$optimal_lag),
+           x = "Lag Order", y = "BIC Value") +
+      theme_minimal(base_size = 14) +
+      theme(plot.title = element_text(face = "bold"))
+  })
+  
+  # Optimal lag text
+  output$optimalLagText <- renderPrint({
+    req(rv$optimal_lag)
+    cat(paste0("\n===========================================\n"))
+    cat(paste0("  Optimal Lag Based on BIC: ", rv$optimal_lag, "\n"))
+    cat(paste0("===========================================\n\n"))
+  })
+  
+  # BIC Table
+  output$bicTable <- renderDT({
+    req(rv$bic_values)
+    datatable(rv$bic_values, 
+              options = list(pageLength = 10)) %>%
+      formatRound("BIC", 4)
+  })
+  
+  # Connectedness Table
+  output$dyTable <- renderDT({
+    req(rv$dyc_results)
+    datatable(rv$dyc_results$TABLE, 
+              options = list(scrollX = TRUE, pageLength = 20)) %>%
+      formatRound(1:ncol(rv$dyc_results$TABLE), 4)
+  })
+  
+  # TCI Plot
+  output$tciPlot <- renderPlot({
+    req(rv$dyc_results)
+    PlotTCI(rv$dyc_results, ylim = c(0, 100))
+  })
+  
+  # TCI Table
+  output$tciTable <- renderDT({
+    req(rv$dyc_results)
+    tci_df <- data.frame(
+      Date = index(rv$dyc_results$TCI),
+      TCI = as.numeric(rv$dyc_results$TCI)
+    )
+    datatable(tci_df, options = list(pageLength = 10)) %>%
+      formatRound("TCI", 4)
+  })
+  
+  # TO Plot
+  output$toPlot <- renderPlot({
+    req(rv$dyc_results)
+    PlotTO(rv$dyc_results, ylim = c(0, 130))
+  })
+  
+  # TO Table
+  output$toTable <- renderDT({
+    req(rv$dyc_results)
+    to_df <- data.frame(
+      Date = index(rv$dyc_results$TO),
+      rv$dyc_results$TO
+    )
+    datatable(to_df, options = list(scrollX = TRUE, pageLength = 10)) %>%
+      formatRound(2:ncol(to_df), 4)
+  })
+  
+  # FROM Plot
+  output$fromPlot <- renderPlot({
+    req(rv$dyc_results)
+    PlotFROM(rv$dyc_results, ylim = c(0, 100))
+  })
+  
+  # FROM Table
+  output$fromTable <- renderDT({
+    req(rv$dyc_results)
+    from_df <- data.frame(
+      Date = index(rv$dyc_results$FROM),
+      rv$dyc_results$FROM
+    )
+    datatable(from_df, options = list(scrollX = TRUE, pageLength = 10)) %>%
+      formatRound(2:ncol(from_df), 4)
+  })
+  
+  # NET Plot
+  output$netPlot <- renderPlot({
+    req(rv$dyc_results)
+    PlotNET(rv$dyc_results, ylim = c(-50, 50))
+  })
+  
+  # NET Table
+  output$netTable <- renderDT({
+    req(rv$dyc_results)
+    net_df <- data.frame(
+      Date = index(rv$dyc_results$NET),
+      rv$dyc_results$NET
+    )
+    datatable(net_df, options = list(scrollX = TRUE, pageLength = 10)) %>%
+      formatRound(2:ncol(net_df), 4)
+  })
+  
+  # Network plots
+  output$networkDefault <- renderPlot({
+    req(rv$dyc_results)
+    PlotNetwork(rv$dyc_results)
+  })
+  
+  output$networkNPDC <- renderPlot({
+    req(rv$dyc_results)
+    PlotNetwork(rv$dyc_results, method = "NPDC")
+  })
+  
+  output$networkPCI <- renderPlot({
+    req(rv$dyc_results)
+    PlotNetwork(rv$dyc_results, method = "PCI")
+  })
+  
+  output$npdcPlot <- renderPlot({
+    req(rv$dyc_results)
+    PlotNPDC(rv$dyc_results, ylim = c(-10, 10))
+  })
+  
+  # Download handler
+  output$downloadReport <- downloadHandler(
+    filename = function() {
+      paste0("DY_Connectedness_", Sys.Date(), ".zip")
+    },
+    content = function(file) {
+      req(rv$dyc_results)
+      
+      # Create temporary directory
+      temp_dir <- tempdir()
+      
+      # Save all tables
+      write.csv(rv$dyc_results$TABLE, 
+                file.path(temp_dir, "DYTable_table.csv"), 
+                row.names = TRUE)
+      write.csv(rv$dyc_results$TCI, 
+                file.path(temp_dir, "TCI_table.csv"), 
+                row.names = TRUE)
+      write.csv(rv$dyc_results$TO, 
+                file.path(temp_dir, "TO_table.csv"), 
+                row.names = TRUE)
+      write.csv(rv$dyc_results$FROM, 
+                file.path(temp_dir, "FROM_table.csv"), 
+                row.names = TRUE)
+      write.csv(rv$dyc_results$NET, 
+                file.path(temp_dir, "NET_table.csv"), 
+                row.names = TRUE)
+      write.csv(rv$bic_values, 
+                file.path(temp_dir, "BIC_values.csv"), 
+                row.names = FALSE)
+      
+      # Create summary report
+      sink(file.path(temp_dir, "Analysis_Summary.txt"))
+      cat("Diebold-Yilmaz TVP-VAR Connectedness Analysis\n")
+      cat(rep("=", 65), "\n\n", sep = "")
+      cat("Generated by: Dr. M.I.M. Riyath\n")
+      cat("Department of Accountancy and Finance\n")
+      cat("South Eastern University of Sri Lanka\n")
+      cat("Email: riyath@seu.ac.lk\n\n")
+      cat("Analysis Date:", as.character(Sys.Date()), "\n\n")
+      cat(rep("-", 65), "\n", sep = "")
+      cat("DATA INFORMATION\n")
+      cat(rep("-", 65), "\n", sep = "")
+      cat("Detected Frequency:", rv$date_frequency, "\n")
+      cat("Sample Period:", format(rv$sample_start, "%Y-%m-%d"), "to", 
+          format(rv$sample_end, "%Y-%m-%d"), "\n")
+      cat("Number of Observations:", nrow(rv$zoo_data), "\n")
+      cat("Number of Variables:", ncol(rv$zoo_data), "\n\n")
+      cat(rep("-", 65), "\n", sep = "")
+      cat("ANALYSIS PARAMETERS\n")
+      cat(rep("-", 65), "\n", sep = "")
+      cat("Optimal Lag (BIC):", rv$optimal_lag, "\n")
+      cat("Forecast Horizon:", input$nfore, "\n")
+      cat("Rolling Window Size:", input$windowSize, "\n")
+      cat("Model Type:", input$model, "\n\n")
+      cat(rep("=", 65), "\n", sep = "")
+      sink()
+      
+      # Create zip file
+      files_to_zip <- list.files(temp_dir, 
+                                 pattern = "\\.csv$|\\.txt$", 
+                                 full.names = TRUE)
+      zip(file, files_to_zip, flags = "-j")
+    }
+  )
+}
+
+shinyApp(ui = ui, server = server)
