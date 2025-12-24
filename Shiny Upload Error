@@ -1,0 +1,11 @@
+library(rsconnect)
+
+# Set extremely long timeout (30 minutes)
+options(rsconnect.http.timeout = 1800)
+
+# Try deploying again
+deployApp(
+  appDir = "C:/Users/MSI/Downloads/R Dep",
+  appName = "DYTVP-VAR",
+  forceUpdate = TRUE
+)
