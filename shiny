@@ -1,0 +1,524 @@
+# app.R - Diebold-Yilmaz TVP-VAR Connectedness Analysis
+# 
+# Author: Dr. M.I.M. Riyath
+# Department of Accountancy and Finance
+# Faculty of Management and Commerce
+# South Eastern University of Sri Lanka, Sri Lanka
+# Email: riyath@seu.ac.lk
+#
+# Version: 1.0
+# Last Updated: December 2025
+
+library(shiny)
+library(shinythemes)
+library(vars)
+library(zoo)
+library(ConnectednessApproach)
+library(tidyr)
+library(dplyr)
+library(readxl)
+library(DT)
+library(ggplot2)
+
+# ---------- UI --------------------------------------------------------------
+
+ui <- fluidPage(
+  theme = shinytheme("flatly"),
+  
+  # Custom CSS
+  tags$head(
+    tags$style(HTML("
+      .app-footer {
+        position: fixed;
+        bottom: 0;
+        width: 100%;
+        background-color: #2c3e50;
+        color: white;
+        text-align: center;
+        padding: 10px 0;
+        font-size: 12px;
+        z-index: 1000;
+        box-shadow: 0 -2px 5px rgba(0,0,0,0.1);
+      }
+      .app-footer a {
+        color: #3498db;
+        text-decoration: none;
+      }
+      .app-footer a:hover {
+        color: #5dade2;
+        text-decoration: underline;
+      }
+      .main-content {
+        padding-bottom: 60px;
+      }
+      .info-box {
+        background-color: #f8f9fa;
+        border-left: 4px solid #3498db;
+        padding: 15px;
+        margin-bottom: 20px;
+      }
+    "))
+  ),
+  
+  div(class = "main-content",
+    titlePanel("Diebold-Yilmaz TVP-VAR Connectedness Analysis"),
+    
+    sidebarLayout(
+      sidebarPanel(
+        width = 3,
+        
+        div(class = "info-box",
+          h5("Upload Data"),
+          p("Upload an Excel file with date column and price/return series.")
+        ),
+        
+        fileInput("file", "Upload Excel File (.xlsx/.xls)", 
+                  accept = c(".xlsx", ".xls")),
+        
+        hr(),
+        
+        h5("Data Settings"),
+        selectInput("dateCol", "Select Date Column:", choices = NULL),
+        checkboxInput("hasOriginalDate", "Keep original dates for reference", value = TRUE),
+        dateInput("startDate", "Start Date for Sequence:", value = "2001-01-01"),
+        selectInput("dateFreq", "Date Frequency:", 
+                    choices = c("Daily" = "day", "Weekly" = "week", 
+                                "Monthly" = "month", "Quarterly" = "quarter", 
+                                "Yearly" = "year"),
+                    selected = "month"),
+        
+        hr(),
+        
+        h5("Model Parameters"),
+        numericInput("maxLag", "Maximum Lag for BIC:", value = 10, min = 1, max = 20),
+        numericInput("nfore", "Forecast Horizon:", value = 10, min = 1, max = 50),
+        numericInput("windowSize", "Rolling Window Size:", value = 200, min = 50, max = 500),
+        selectInput("model", "Model Type:", 
+                    choices = c("TVP-VAR", "VAR"),
+                    selected = "TVP-VAR"),
+        
+        hr(),
+        
+        actionButton("runAnalysis", "Run Analysis", 
+                     class = "btn-primary btn-block", 
+                     icon = icon("play")),
+        
+        hr(),
+        
+        downloadButton("downloadReport", "Download All Results", 
+                       class = "btn-success btn-block")
+      ),
+      
+      mainPanel(
+        width = 9,
+        
+        tabsetPanel(
+          id = "mainTabs",
+          
+          tabPanel("Data Preview",
+                   h4("Raw Data"),
+                   DTOutput("rawData"),
+                   hr(),
+                   h4("Summary Statistics"),
+                   verbatimTextOutput("dataSummary")
+          ),
+          
+          tabPanel("Optimal Lag",
+                   h4("BIC Values for Different Lags"),
+                   plotOutput("bicPlot", height = "400px"),
+                   hr(),
+                   verbatimTextOutput("optimalLagText"),
+                   hr(),
+                   DTOutput("bicTable")
+          ),
+          
+          tabPanel("Connectedness Table",
+                   h4("Static Connectedness Table"),
+                   DTOutput("dyTable")
+          ),
+          
+          tabPanel("Total Connectedness",
+                   h4("Total Connectedness Index (TCI)"),
+                   plotOutput("tciPlot", height = "500px"),
+                   hr(),
+                   DTOutput("tciTable")
+          ),
+          
+          tabPanel("TO Connectedness",
+                   h4("Directional Connectedness TO Others"),
+                   plotOutput("toPlot", height = "500px"),
+                   hr(),
+                   DTOutput("toTable")
+          ),
+          
+          tabPanel("FROM Connectedness",
+                   h4("Directional Connectedness FROM Others"),
+                   plotOutput("fromPlot", height = "500px"),
+                   hr(),
+                   DTOutput("fromTable")
+          ),
+          
+          tabPanel("NET Connectedness",
+                   h4("Net Directional Connectedness"),
+                   plotOutput("netPlot", height = "500px"),
+                   hr(),
+                   DTOutput("netTable")
+          ),
+          
+          tabPanel("Network Plots",
+                   h4("Network Visualization"),
+                   fluidRow(
+                     column(6,
+                            h5("Default Network"),
+                            plotOutput("networkDefault", height = "400px")
+                     ),
+                     column(6,
+                            h5("NPDC Network"),
+                            plotOutput("networkNPDC", height = "400px")
+                     )
+                   ),
+                   hr(),
+                   fluidRow(
+                     column(6,
+                            h5("PCI Network"),
+                            plotOutput("networkPCI", height = "400px")
+                     ),
+                     column(6,
+                            h5("NPDC Over Time"),
+                            plotOutput("npdcPlot", height = "400px")
+                     )
+                   )
+          )
+        )
+      )
+    )
+  ),
+  
+  # Footer
+  div(class = "app-footer",
+      HTML("Developed by <strong>Dr. M.I.M. Riyath</strong> | 
+         Department of Accountancy and Finance, Faculty of Management and Commerce, 
+         South Eastern University of Sri Lanka | 
+         <a href='mailto:riyath@seu.ac.lk'>riyath@seu.ac.lk</a>")
+  )
+)
+
+# ---------- SERVER ----------------------------------------------------------
+
+server <- function(input, output, session) {
+  
+  # Reactive values
+  rv <- reactiveValues(
+    raw_data = NULL,
+    processed_data = NULL,
+    zoo_data = NULL,
+    optimal_lag = NULL,
+    bic_values = NULL,
+    dyc_results = NULL
+  )
+  
+  # Load data
+  observeEvent(input$file, {
+    req(input$file)
+    
+    tryCatch({
+      rv$raw_data <- read_excel(input$file$datapath)
+      
+      # Update date column selector
+      updateSelectInput(session, "dateCol", 
+                        choices = names(rv$raw_data),
+                        selected = names(rv$raw_data)[1])
+      
+      showNotification("Data loaded successfully!", type = "message")
+      
+    }, error = function(e) {
+      showNotification(paste("Error loading file:", e$message), type = "error")
+    })
+  })
+  
+  # Display raw data
+  output$rawData <- renderDT({
+    req(rv$raw_data)
+    datatable(rv$raw_data, 
+              options = list(scrollX = TRUE, pageLength = 10))
+  })
+  
+  # Display summary
+  output$dataSummary <- renderPrint({
+    req(rv$raw_data)
+    summary(rv$raw_data)
+  })
+  
+  # Run analysis
+  observeEvent(input$runAnalysis, {
+    req(rv$raw_data, input$dateCol)
+    
+    withProgress(message = 'Running Analysis...', value = 0, {
+      
+      tryCatch({
+        
+        # Step 1: Prepare data
+        incProgress(0.1, detail = "Preparing data...")
+        
+        PriceData <- rv$raw_data
+        
+        # Handle dates
+        if (input$hasOriginalDate) {
+          PriceData$OriginalDate <- PriceData[[input$dateCol]]
+        }
+        
+        # Create date sequence
+        PriceData$Date <- seq(as.Date(input$startDate), 
+                              by = input$dateFreq, 
+                              length.out = nrow(PriceData))
+        
+        # Remove NA rows
+        PriceData <- na.omit(PriceData)
+        
+        # Extract dates and data
+        date <- PriceData$Date
+        df <- PriceData[, !(names(PriceData) %in% c("Date", "OriginalDate", input$dateCol))]
+        
+        # Create zoo object
+        zoo_data <- zoo(df, order.by = date)
+        
+        # Handle duplicate dates
+        if(any(duplicated(index(zoo_data)))) {
+          zoo_data <- aggregate(zoo_data, by = index(zoo_data), FUN = mean)
+        }
+        
+        rv$zoo_data <- zoo_data
+        rv$processed_data <- PriceData
+        
+        # Step 2: Find optimal lag
+        incProgress(0.3, detail = "Calculating optimal lag...")
+        
+        calculate_bic <- function(data, lag) {
+          var_model <- vars::VAR(data, p = lag, type = "const")
+          return(BIC(var_model))
+        }
+        
+        bic_values <- sapply(1:input$maxLag, function(lag) {
+          calculate_bic(zoo_data, lag)
+        })
+        
+        optimal_lag <- which.min(bic_values)
+        
+        rv$bic_values <- data.frame(
+          Lag = 1:input$maxLag,
+          BIC = bic_values
+        )
+        rv$optimal_lag <- optimal_lag
+        
+        # Step 3: Run connectedness analysis
+        incProgress(0.5, detail = "Running connectedness analysis...")
+        
+        dyc <- ConnectednessApproach(zoo_data, 
+                                     nlag = optimal_lag, 
+                                     nfore = input$nfore, 
+                                     window.size = input$windowSize, 
+                                     model = input$model, 
+                                     connectedness = "Time")
+        
+        rv$dyc_results <- dyc
+        
+        incProgress(1.0, detail = "Complete!")
+        
+        showNotification("Analysis completed successfully!", type = "message")
+        updateTabsetPanel(session, "mainTabs", selected = "Optimal Lag")
+        
+      }, error = function(e) {
+        showNotification(paste("Error in analysis:", e$message), type = "error")
+      })
+    })
+  })
+  
+  # BIC Plot
+  output$bicPlot <- renderPlot({
+    req(rv$bic_values, rv$optimal_lag)
+    
+    ggplot(rv$bic_values, aes(x = Lag, y = BIC)) +
+      geom_line(color = "#3498db", size = 1) +
+      geom_point(color = "#2c3e50", size = 3) +
+      geom_point(data = rv$bic_values[rv$optimal_lag, ], 
+                 aes(x = Lag, y = BIC), 
+                 color = "#e74c3c", size = 5) +
+      geom_vline(xintercept = rv$optimal_lag, 
+                 linetype = "dashed", color = "#e74c3c") +
+      labs(title = "BIC Values Across Different Lags",
+           subtitle = paste("Optimal Lag:", rv$optimal_lag),
+           x = "Lag Order", y = "BIC Value") +
+      theme_minimal(base_size = 14) +
+      theme(plot.title = element_text(face = "bold"))
+  })
+  
+  # Optimal lag text
+  output$optimalLagText <- renderPrint({
+    req(rv$optimal_lag)
+    cat(paste0("\n===========================================\n"))
+    cat(paste0("  Optimal Lag Based on BIC: ", rv$optimal_lag, "\n"))
+    cat(paste0("===========================================\n\n"))
+  })
+  
+  # BIC Table
+  output$bicTable <- renderDT({
+    req(rv$bic_values)
+    datatable(rv$bic_values, 
+              options = list(pageLength = 10)) %>%
+      formatRound("BIC", 4)
+  })
+  
+  # Connectedness Table
+  output$dyTable <- renderDT({
+    req(rv$dyc_results)
+    datatable(rv$dyc_results$TABLE, 
+              options = list(scrollX = TRUE, pageLength = 20)) %>%
+      formatRound(1:ncol(rv$dyc_results$TABLE), 4)
+  })
+  
+  # TCI Plot
+  output$tciPlot <- renderPlot({
+    req(rv$dyc_results)
+    PlotTCI(rv$dyc_results, ylim = c(0, 100))
+  })
+  
+  # TCI Table
+  output$tciTable <- renderDT({
+    req(rv$dyc_results)
+    tci_df <- data.frame(
+      Date = index(rv$dyc_results$TCI),
+      TCI = as.numeric(rv$dyc_results$TCI)
+    )
+    datatable(tci_df, options = list(pageLength = 10)) %>%
+      formatRound("TCI", 4)
+  })
+  
+  # TO Plot
+  output$toPlot <- renderPlot({
+    req(rv$dyc_results)
+    PlotTO(rv$dyc_results, ylim = c(0, 130))
+  })
+  
+  # TO Table
+  output$toTable <- renderDT({
+    req(rv$dyc_results)
+    to_df <- data.frame(
+      Date = index(rv$dyc_results$TO),
+      rv$dyc_results$TO
+    )
+    datatable(to_df, options = list(scrollX = TRUE, pageLength = 10)) %>%
+      formatRound(2:ncol(to_df), 4)
+  })
+  
+  # FROM Plot
+  output$fromPlot <- renderPlot({
+    req(rv$dyc_results)
+    PlotFROM(rv$dyc_results, ylim = c(0, 100))
+  })
+  
+  # FROM Table
+  output$fromTable <- renderDT({
+    req(rv$dyc_results)
+    from_df <- data.frame(
+      Date = index(rv$dyc_results$FROM),
+      rv$dyc_results$FROM
+    )
+    datatable(from_df, options = list(scrollX = TRUE, pageLength = 10)) %>%
+      formatRound(2:ncol(from_df), 4)
+  })
+  
+  # NET Plot
+  output$netPlot <- renderPlot({
+    req(rv$dyc_results)
+    PlotNET(rv$dyc_results, ylim = c(-50, 50))
+  })
+  
+  # NET Table
+  output$netTable <- renderDT({
+    req(rv$dyc_results)
+    net_df <- data.frame(
+      Date = index(rv$dyc_results$NET),
+      rv$dyc_results$NET
+    )
+    datatable(net_df, options = list(scrollX = TRUE, pageLength = 10)) %>%
+      formatRound(2:ncol(net_df), 4)
+  })
+  
+  # Network plots
+  output$networkDefault <- renderPlot({
+    req(rv$dyc_results)
+    PlotNetwork(rv$dyc_results)
+  })
+  
+  output$networkNPDC <- renderPlot({
+    req(rv$dyc_results)
+    PlotNetwork(rv$dyc_results, method = "NPDC")
+  })
+  
+  output$networkPCI <- renderPlot({
+    req(rv$dyc_results)
+    PlotNetwork(rv$dyc_results, method = "PCI")
+  })
+  
+  output$npdcPlot <- renderPlot({
+    req(rv$dyc_results)
+    PlotNPDC(rv$dyc_results, ylim = c(-10, 10))
+  })
+  
+  # Download handler
+  output$downloadReport <- downloadHandler(
+    filename = function() {
+      paste0("DY_Connectedness_", Sys.Date(), ".zip")
+    },
+    content = function(file) {
+      req(rv$dyc_results)
+      
+      # Create temporary directory
+      temp_dir <- tempdir()
+      
+      # Save all tables
+      write.csv(rv$dyc_results$TABLE, 
+                file.path(temp_dir, "DYTable_table.csv"), 
+                row.names = TRUE)
+      write.csv(rv$dyc_results$TCI, 
+                file.path(temp_dir, "TCI_table.csv"), 
+                row.names = TRUE)
+      write.csv(rv$dyc_results$TO, 
+                file.path(temp_dir, "TO_table.csv"), 
+                row.names = TRUE)
+      write.csv(rv$dyc_results$FROM, 
+                file.path(temp_dir, "FROM_table.csv"), 
+                row.names = TRUE)
+      write.csv(rv$dyc_results$NET, 
+                file.path(temp_dir, "NET_table.csv"), 
+                row.names = TRUE)
+      write.csv(rv$bic_values, 
+                file.path(temp_dir, "BIC_values.csv"), 
+                row.names = FALSE)
+      
+      # Create summary report
+      sink(file.path(temp_dir, "Analysis_Summary.txt"))
+      cat("Diebold-Yilmaz TVP-VAR Connectedness Analysis\n")
+      cat("=", rep("=", 60), "\n\n", sep = "")
+      cat("Generated by: Dr. M.I.M. Riyath\n")
+      cat("Date:", as.character(Sys.Date()), "\n\n")
+      cat("Analysis Parameters:\n")
+      cat("-------------------\n")
+      cat("Optimal Lag:", rv$optimal_lag, "\n")
+      cat("Forecast Horizon:", input$nfore, "\n")
+      cat("Window Size:", input$windowSize, "\n")
+      cat("Model Type:", input$model, "\n\n")
+      cat("Number of Variables:", ncol(rv$zoo_data), "\n")
+      cat("Sample Size:", nrow(rv$zoo_data), "\n")
+      sink()
+      
+      # Create zip file
+      files_to_zip <- list.files(temp_dir, 
+                                  pattern = "\\.csv$|\\.txt$", 
+                                  full.names = TRUE)
+      zip(file, files_to_zip, flags = "-j")
+    }
+  )
+}
+
+shinyApp(ui = ui, server = server)
